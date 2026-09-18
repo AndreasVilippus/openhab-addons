@@ -107,6 +107,7 @@
     <module>org.openhab.binding.bticinosmarther</module>
     <module>org.openhab.binding.buienradar</module>
     <module>org.openhab.binding.caddx</module>
+    <module>org.openhab.binding.caldav</module>
     <module>org.openhab.binding.casokitchen</module>
     <module>org.openhab.binding.cbus</module>
     <module>org.openhab.binding.chatgpt</module>
@@ -897,8 +898,8 @@
                 <phase>validate</phase>
                 <configuration>
                   <name>markdownlint.execution.skip</name>
-                  <value>true|${markdownlint.skip}|${project.artifactId}|${session.topLevelProject.basedir}</value>
-                  <regex>^(?:(true)\|true\|.*|true\|false\|org\.openhab\.addons\.reactor\.bundles\|.*|true\|false\|.*\|\Q${project.basedir}\E|(true)\|.*)$</regex>
+                  <value>true|${markdownlint.skip}|${project.artifactId}|${session.topLevelProject.baseUri}</value>
+                  <regex>^(?:(true)\|true\|.*|true\|false\|org\.openhab\.addons\.reactor\.bundles\|.*|true\|false\|.*\|\Q${project.baseUri}\E|(true)\|.*)$</regex>
                   <replacement>$1$2</replacement>
                 </configuration>
               </execution>

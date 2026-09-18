@@ -1,0 +1,10 @@
+openHAB CalDAV Binding
+
+This specification package contains original project material intended for use
+under the Eclipse Public License 2.0 (EPL-2.0).
+
+The CalDAV logo files in logo/ are original project artwork and do not contain
+third-party artwork, trademarks, external fonts or embedded raster images.
+
+Third-party runtime dependencies, if introduced during implementation, must be
+reviewed and added to the final binding NOTICE as required.
