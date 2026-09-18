@@ -61,4 +61,18 @@ class EventJsonTest {
         assertTrue(json.contains("\"start\":null"));
         assertTrue(json.contains("\"end\":null"));
     }
+
+    @Test
+    void roundTripsEveryJsonControlCharacter() {
+        StringBuilder text = new StringBuilder("quotes\" slash\\ ä <tag>");
+        for (char c = 0; c < 32; c++) {
+            text.append(c);
+        }
+        CalendarEvent event = new CalendarEvent("controls", null, text.toString(), "", "", null, null,
+                LocalDate.of(2026, 9, 17), LocalDate.of(2026, 9, 18), true, "CONFIRMED", List.of(), "");
+        String json = EventJson.serialize(List.of(event));
+        assertEquals(text.toString(), com.google.gson.JsonParser.parseString(json).getAsJsonArray().get(0)
+                .getAsJsonObject().get("title").getAsString());
+        assertTrue(json.chars().noneMatch(c -> c < 32));
+    }
 }

@@ -13,13 +13,16 @@
 package org.openhab.binding.caldav.internal.client;
 
 import java.io.StringReader;
+import java.nio.charset.StandardCharsets;
 
 import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilderFactory;
 
 import org.eclipse.jdt.annotation.NonNullByDefault;
+import org.eclipse.jdt.annotation.Nullable;
 import org.w3c.dom.Document;
 import org.xml.sax.InputSource;
+import org.xml.sax.SAXParseException;
 
 @NonNullByDefault
 public final class CalDavXml {
@@ -27,7 +30,7 @@ public final class CalDavXml {
     }
 
     public static Document parse(String xml) throws Exception {
-        if (xml.length() > CalDavClient.MAX_RESPONSE_BYTES) {
+        if (xml.getBytes(StandardCharsets.UTF_8).length > CalDavClient.MAX_RESPONSE_BYTES) {
             throw new IllegalArgumentException("CalDAV XML response exceeds limit");
         }
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
@@ -42,6 +45,18 @@ public final class CalDavXml {
         factory.setExpandEntityReferences(false);
         factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
         factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
-        return factory.newDocumentBuilder().parse(new InputSource(new StringReader(xml)));
+        var builder = factory.newDocumentBuilder();
+        builder.setErrorHandler(new org.xml.sax.helpers.DefaultHandler() {
+            @Override
+            public void error(@Nullable SAXParseException e) throws org.xml.sax.SAXException {
+                throw java.util.Objects.requireNonNull(e);
+            }
+
+            @Override
+            public void fatalError(@Nullable SAXParseException e) throws org.xml.sax.SAXException {
+                throw java.util.Objects.requireNonNull(e);
+            }
+        });
+        return builder.parse(new InputSource(new StringReader(xml)));
     }
 }

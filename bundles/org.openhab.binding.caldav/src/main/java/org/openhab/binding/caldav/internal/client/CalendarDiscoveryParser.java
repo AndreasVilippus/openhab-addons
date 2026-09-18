@@ -18,8 +18,6 @@ import java.util.List;
 
 import org.eclipse.jdt.annotation.NonNullByDefault;
 import org.w3c.dom.Element;
-import org.w3c.dom.Node;
-import org.w3c.dom.NodeList;
 
 /**
  * Parses the DAV and CalDAV properties used during discovery.
@@ -35,61 +33,79 @@ public final class CalendarDiscoveryParser {
     }
 
     public static URI currentUserPrincipal(String xml, URI baseUri) throws Exception {
-        return resolveHref(
-                firstHref(CalDavXml.parse(xml).getElementsByTagNameNS(DAV_NAMESPACE, "current-user-principal"),
-                        DAV_NAMESPACE, "href"),
-                baseUri);
+        return propertyHref(xml, baseUri, DAV_NAMESPACE, "current-user-principal");
     }
 
     public static URI calendarHome(String xml, URI baseUri) throws Exception {
-        return resolveHref(firstHref(CalDavXml.parse(xml).getElementsByTagNameNS(CALDAV_NAMESPACE, "calendar-home-set"),
-                DAV_NAMESPACE, "href"), baseUri);
+        return propertyHref(xml, baseUri, CALDAV_NAMESPACE, "calendar-home-set");
+    }
+
+    private static URI propertyHref(String xml, URI baseUri, String namespace, String name) throws Exception {
+        for (Element response : responses(xml)) {
+            for (Element prop : properties(response)) {
+                for (Element property : DavResponse.children(prop, namespace, name)) {
+                    String href = DavResponse.text(property, DAV_NAMESPACE, "href");
+                    if (!href.isBlank()) {
+                        return CalDavUris.resolve(baseUri, href);
+                    }
+                }
+            }
+        }
+        throw new IllegalArgumentException("Required discovery property is unavailable");
     }
 
     public static List<CalendarCollection> collections(String xml, URI baseUri) throws Exception {
-        var document = CalDavXml.parse(xml);
-        NodeList responses = document.getElementsByTagNameNS(DAV_NAMESPACE, "response");
         List<CalendarCollection> collections = new ArrayList<>();
-        for (int index = 0; index < responses.getLength(); index++) {
-            Element response = (Element) responses.item(index);
-            String href = firstHref(response.getElementsByTagNameNS(DAV_NAMESPACE, "href"), DAV_NAMESPACE, "href");
-            NodeList resourceTypes = response.getElementsByTagNameNS(DAV_NAMESPACE, "resourcetype");
+        for (Element response : responses(xml)) {
             boolean calendar = false;
-            for (int typeIndex = 0; typeIndex < resourceTypes.getLength(); typeIndex++) {
-                if (((Element) resourceTypes.item(typeIndex)).getElementsByTagNameNS(CALDAV_NAMESPACE, "calendar")
-                        .getLength() > 0) {
-                    calendar = true;
-                    break;
+            String name = "";
+            for (Element prop : properties(response)) {
+                String displayName = DavResponse.text(prop, DAV_NAMESPACE, "displayname");
+                if (!displayName.isBlank()) {
+                    name = displayName;
+                }
+                for (Element type : DavResponse.children(prop, DAV_NAMESPACE, "resourcetype")) {
+                    calendar |= !DavResponse.children(type, CALDAV_NAMESPACE, "calendar").isEmpty();
                 }
             }
             if (calendar) {
-                String name = firstText(response.getElementsByTagNameNS(DAV_NAMESPACE, "displayname"));
-                collections.add(new CalendarCollection(resolveHref(href, baseUri), name.isBlank() ? href : name));
+                String href = DavResponse.text(response, DAV_NAMESPACE, "href");
+                if (href.isBlank()) {
+                    throw new java.io.IOException("Calendar collection has no href");
+                }
+                collections
+                        .add(new CalendarCollection(CalDavUris.resolve(baseUri, href), name.isBlank() ? href : name));
             }
         }
         return List.copyOf(collections);
     }
 
-    private static String firstHref(NodeList nodes, String namespace, String localName) throws Exception {
-        if (nodes.getLength() == 0) {
-            throw new IllegalArgumentException("CalDAV response does not contain " + localName);
+    private static List<Element> responses(String xml) throws Exception {
+        Element root = CalDavXml.parse(xml).getDocumentElement();
+        if (!DAV_NAMESPACE.equals(root.getNamespaceURI()) || !"multistatus".equals(root.getLocalName())) {
+            throw new java.io.IOException("Expected DAV multistatus");
         }
-        Node node = nodes.item(0);
-        if (namespace.equals(node.getNamespaceURI()) && localName.equals(node.getLocalName())) {
-            return node.getTextContent().trim();
+        List<Element> responses = DavResponse.children(root, DAV_NAMESPACE, "response");
+        if (responses.size() > DavResponse.MAX_RESOURCES) {
+            throw new java.io.IOException("Too many discovery resources");
         }
-        NodeList hrefs = ((Element) node).getElementsByTagNameNS(namespace, localName);
-        if (hrefs.getLength() == 0) {
-            throw new IllegalArgumentException("CalDAV response does not contain " + localName);
-        }
-        return hrefs.item(0).getTextContent().trim();
+        return responses;
     }
 
-    private static String firstText(NodeList nodes) {
-        return nodes.getLength() == 0 ? "" : nodes.item(0).getTextContent().trim();
-    }
-
-    private static URI resolveHref(String href, URI baseUri) {
-        return CalDavUris.resolve(CalDavUris.validate(baseUri), href);
+    private static List<Element> properties(Element response) throws java.io.IOException {
+        int status = DavResponse.status(DavResponse.text(response, DAV_NAMESPACE, "status"));
+        if (status != 0 && status != 200) {
+            throw new java.io.IOException("Discovery resource retrieval failed");
+        }
+        List<Element> properties = new ArrayList<>();
+        for (Element propstat : DavResponse.children(response, DAV_NAMESPACE, "propstat")) {
+            int propertyStatus = DavResponse.status(DavResponse.text(propstat, DAV_NAMESPACE, "status"));
+            if (propertyStatus == 200) {
+                properties.addAll(DavResponse.children(propstat, DAV_NAMESPACE, "prop"));
+            } else if (propertyStatus != 404) {
+                throw new java.io.IOException("Discovery property retrieval failed");
+            }
+        }
+        return properties;
     }
 }

@@ -1,10 +1,33 @@
-openHAB CalDAV Binding
+This content is produced and maintained by the openHAB project.
 
-This specification package contains original project material intended for use
-under the Eclipse Public License 2.0 (EPL-2.0).
+* Project home: https://www.openhab.org
 
-The CalDAV logo files in logo/ are original project artwork and do not contain
-third-party artwork, trademarks, external fonts or embedded raster images.
+== Declared Project Licenses
 
-Third-party runtime dependencies, if introduced during implementation, must be
-reviewed and added to the final binding NOTICE as required.
+This program and the accompanying materials are made available under the terms
+of the Eclipse Public License 2.0 which is available at
+https://www.eclipse.org/legal/epl-2.0/.
+
+== Source Code
+
+https://github.com/openhab/openhab-addons
+
+== Third Party Dependencies
+
+biweekly and vinnie are embedded in this bundle. Jackson is supplied by the
+openHAB runtime.
+
+=== net.sf.biweekly:biweekly:0.6.6
+Author: Michael Angstadt, Apache Software Foundation, Google Inc.
+URL: https://github.com/mangstadt/biweekly
+License: BSD 2-Clause License, Apache License Version 2.0
+
+=== com.github.mangstadt:vinnie:2.0.2
+Author: Michael Angstadt, Apache Software Foundation
+URL: https://github.com/mangstadt/vinnie
+License: MIT License, Apache License Version 2.0
+
+=== com.fasterxml.jackson.core:jackson-core, jackson-databind, jackson-annotations
+Author: FasterXML LLC
+URL: https://github.com/FasterXML
+License: Apache License Version 2.0

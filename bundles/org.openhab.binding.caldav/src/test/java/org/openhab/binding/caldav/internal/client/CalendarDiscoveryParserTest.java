@@ -28,10 +28,10 @@ class CalendarDiscoveryParserTest {
     void resolvesPrincipalAndCalendarHome() throws Exception {
         String principal = "<d:multistatus xmlns:d=\"DAV:\"><d:response><d:propstat><d:prop>"
                 + "<d:current-user-principal><d:href>/principals/user/</d:href></d:current-user-principal>"
-                + "</d:prop></d:propstat></d:response></d:multistatus>";
+                + "</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>";
         String home = "<d:multistatus xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">"
                 + "<d:response><d:propstat><d:prop><c:calendar-home-set><d:href>/calendars/user/"
-                + "</d:href></c:calendar-home-set></d:prop></d:propstat></d:response></d:multistatus>";
+                + "</d:href></c:calendar-home-set></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>";
 
         assertEquals(URI.create("https://caldav.example.test/principals/user/"),
                 CalendarDiscoveryParser.currentUserPrincipal(principal, BASE_URI));
@@ -43,9 +43,9 @@ class CalendarDiscoveryParserTest {
     void returnsOnlyCalendarCollections() throws Exception {
         String xml = "<d:multistatus xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">"
                 + "<d:response><d:href>private/</d:href><d:propstat><d:prop><d:displayname>Private</d:displayname>"
-                + "<d:resourcetype><d:collection/><c:calendar/></d:resourcetype></d:prop></d:propstat></d:response>"
+                + "<d:resourcetype><d:collection/><c:calendar/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
                 + "<d:response><d:href>addressbook/</d:href><d:propstat><d:prop><d:displayname>Contacts</d:displayname>"
-                + "<d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>"
+                + "<d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
                 + "</d:multistatus>";
 
         var collections = CalendarDiscoveryParser.collections(xml, BASE_URI);
@@ -58,20 +58,20 @@ class CalendarDiscoveryParserTest {
     @Test
     void resolvesAbsoluteHrefAndUsesHrefWhenDisplayNameIsMissing() throws Exception {
         String xml = "<d:multistatus xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">"
-                + "<d:response><d:href>https://other.example.test/calendars/work/</d:href><d:propstat><d:prop>"
+                + "<d:response><d:href>https://caldav.example.test/calendars/work/</d:href><d:propstat><d:prop>"
                 + "<d:displayname> </d:displayname><d:resourcetype><c:calendar/></d:resourcetype>"
-                + "</d:prop></d:propstat></d:response></d:multistatus>";
+                + "</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>";
 
         var collections = CalendarDiscoveryParser.collections(xml, BASE_URI);
 
-        assertEquals(URI.create("https://other.example.test/calendars/work/"), collections.get(0).uri());
-        assertEquals("https://other.example.test/calendars/work/", collections.get(0).name());
+        assertEquals(URI.create("https://caldav.example.test/calendars/work/"), collections.get(0).uri());
+        assertEquals("https://caldav.example.test/calendars/work/", collections.get(0).name());
     }
 
     @Test
     void rejectsDiscoveryResponsesWithoutRequiredHref() {
         String xml = "<d:multistatus xmlns:d=\"DAV:\"><d:response><d:propstat><d:prop>"
-                + "<d:current-user-principal/></d:prop></d:propstat></d:response></d:multistatus>";
+                + "<d:current-user-principal/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>";
 
         assertThrows(IllegalArgumentException.class, () -> CalendarDiscoveryParser.currentUserPrincipal(xml, BASE_URI));
     }
@@ -83,5 +83,16 @@ class CalendarDiscoveryParserTest {
                 + "</d:multistatus>";
 
         assertThrows(Exception.class, () -> CalendarDiscoveryParser.collections(xml, BASE_URI));
+    }
+
+    @Test
+    void failedPropertiesAndForeignOriginsCannotBecomeDiscoveredCalendars() throws Exception {
+        String xml = "<d:multistatus xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\"><d:response><d:href>https://foreign.example/calendar/</d:href>"
+                + "<d:propstat><d:prop><d:resourcetype><c:calendar/></d:resourcetype></d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat></d:response></d:multistatus>";
+        assertEquals(0, CalendarDiscoveryParser.collections(xml, BASE_URI).size());
+        assertThrows(IllegalArgumentException.class,
+                () -> CalendarDiscoveryParser.collections(xml.replace("404 Not Found", "200 OK"), BASE_URI));
+        assertThrows(java.io.IOException.class, () -> CalendarDiscoveryParser
+                .collections(xml.replace("404 Not Found", "500 Internal Server Error"), BASE_URI));
     }
 }

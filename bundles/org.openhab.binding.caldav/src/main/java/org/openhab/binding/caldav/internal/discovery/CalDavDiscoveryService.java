@@ -20,6 +20,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.eclipse.jdt.annotation.NonNullByDefault;
 import org.eclipse.jdt.annotation.Nullable;
@@ -46,7 +47,7 @@ public class CalDavDiscoveryService extends AbstractThingHandlerDiscoveryService
         implements ThingHandlerService {
     private static final Set<ThingTypeUID> TYPES = Set.of(new ThingTypeUID(BINDING_ID, CALENDAR_THING_TYPE));
     private @Nullable ScheduledFuture<?> background;
-    private volatile long generation;
+    private final AtomicLong generation = new AtomicLong();
 
     @Activate
     public CalDavDiscoveryService() {
@@ -55,14 +56,14 @@ public class CalDavDiscoveryService extends AbstractThingHandlerDiscoveryService
 
     @Override
     protected void startScan() {
-        long current = ++generation;
+        long current = generation.incrementAndGet();
         AccountHandler handler = thingHandler;
         handler.discover(collections -> {
-            if (generation != current) {
+            if (generation.get() != current) {
                 return;
             }
             for (CalendarCollection collection : collections) {
-                if (generation != current) {
+                if (generation.get() != current) {
                     return;
                 }
                 ThingUID uid = new ThingUID(new ThingTypeUID(BINDING_ID, CALENDAR_THING_TYPE),
@@ -88,7 +89,7 @@ public class CalDavDiscoveryService extends AbstractThingHandlerDiscoveryService
 
     @Override
     protected void stopBackgroundDiscovery() {
-        generation++;
+        generation.incrementAndGet();
         ScheduledFuture<?> job = background;
         background = null;
         if (job != null) {
@@ -98,7 +99,7 @@ public class CalDavDiscoveryService extends AbstractThingHandlerDiscoveryService
 
     @Override
     public void stopScan() {
-        generation++;
+        generation.incrementAndGet();
         super.stopScan();
     }
 

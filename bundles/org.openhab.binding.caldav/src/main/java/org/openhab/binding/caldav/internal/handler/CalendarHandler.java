@@ -13,10 +13,14 @@
 package org.openhab.binding.caldav.internal.handler;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -60,6 +64,7 @@ import com.google.gson.Gson;
 /**
  * Publishes bounded calendar snapshots and updates clock-dependent channels locally.
  * 
+ * @author Andreas Vilippus - Initial contribution
  * @author Andreas Vilippus - Cache, lifecycle and local event transitions
  */
 @NonNullByDefault
@@ -91,11 +96,14 @@ public class CalendarHandler extends BaseThingHandler {
 
     @Override
     public void initialize() {
+        dispose();
         synchronized (lifecycle) {
             generation++;
             active = true;
             CalendarConfiguration initial = getConfigAs(CalendarConfiguration.class);
             configuration = initial;
+            clearEvents();
+            cacheIdentity = "";
             if (!initial.enabled) {
                 updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.DISABLED);
                 return;
@@ -106,6 +114,11 @@ public class CalendarHandler extends BaseThingHandler {
         }
         Bridge bridge = getBridge();
         if (bridge != null && bridge.getHandler() instanceof AccountHandler account) {
+            long current;
+            synchronized (lifecycle) {
+                current = generation;
+            }
+            scheduler.execute(() -> restoreAtStartup(account.configuration(), current));
             account.requestSync();
         }
     }
@@ -118,8 +131,13 @@ public class CalendarHandler extends BaseThingHandler {
     }
 
     public void bridgeConnectionFailed() {
+        bridgeConnectionFailed(() -> true);
+    }
+
+    public void bridgeConnectionFailed(BooleanSupplier accountValid) {
         synchronized (lifecycle) {
-            if (!active || configuration == null || !configuration.enabled) {
+            CalendarConfiguration configured = configuration;
+            if (!active || !accountValid.getAsBoolean() || configured == null || !configured.enabled) {
                 return;
             }
             set("sync#status", new StringType("ERROR"));
@@ -146,11 +164,12 @@ public class CalendarHandler extends BaseThingHandler {
         long current;
         CalendarConfiguration config;
         synchronized (lifecycle) {
-            if (!active || configuration == null || !configuration.enabled) {
+            CalendarConfiguration configured = configuration;
+            if (!active || configured == null || !configured.enabled) {
                 return;
             }
             current = generation;
-            config = Objects.requireNonNull(configuration);
+            config = configured;
         }
         try {
             ZoneId zone = timeZoneProvider.getTimeZone();
@@ -158,23 +177,29 @@ public class CalendarHandler extends BaseThingHandler {
             URI uri = CalDavConfiguration.validate(config, account);
             CalendarWindow horizon = CalDavConfiguration.horizon(account, zone, now);
             CalDavConfiguration.validate(CalendarWindow.from(config, zone, now), horizon);
+            String identity = identity(account, uri, zone);
+            boolean restoreNeeded;
+            synchronized (lifecycle) {
+                restoreNeeded = !identity.equals(cacheIdentity);
+            }
+            Restored restored = restoreNeeded ? readCache(identity, horizon, zone, config) : null;
             CalendarSynchronizer worker;
             synchronized (lifecycle) {
                 if (!valid(current, accountValid)) {
                     return;
                 }
-                String identity = account.url + "|" + account.username + "|" + uri + "|" + zone;
                 if (!identity.equals(cacheIdentity)) {
                     clearEvents();
                     cacheIdentity = identity;
-                    restore(horizon, zone, config);
+                    synchronizer = null;
+                    applyCache(restored, zone, config);
                 }
-                if (synchronizer == null || transport != client || !uri.equals(collection)) {
+                if (synchronizer == null || !client.equals(transport) || !uri.equals(collection)) {
                     synchronizer = new CalendarSynchronizer(client, uri);
                     transport = client;
                     collection = uri;
                 }
-                worker = synchronizer;
+                worker = Objects.requireNonNull(synchronizer);
                 set("sync#status", new StringType("SYNCING"));
             }
             CalendarSynchronizer.Result result = worker.synchronize(horizon, zone, account.syncMode,
@@ -188,13 +213,13 @@ public class CalendarHandler extends BaseThingHandler {
                 synchronizedOnce = true;
                 cachedHorizon = horizon;
                 cachedZone = zone;
-                publish(config, zone, now);
+                publish(config, zone, ZonedDateTime.now(zone));
                 boolean partial = result.failedResources() > 0;
                 set("sync#status", new StringType(partial ? "PARTIAL" : "OK"));
                 set("sync#error", new StringType(
                         partial ? result.failedResources() + " calendar resources could not be processed" : ""));
                 if (!partial) {
-                    set("sync#last", new DateTimeType(now));
+                    set("sync#last", new DateTimeType(ZonedDateTime.now(zone)));
                 }
                 updateStatus(ThingStatus.ONLINE);
                 save(result.snapshot());
@@ -203,27 +228,33 @@ public class CalendarHandler extends BaseThingHandler {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw e;
-        } catch (Exception e) {
+        } catch (CalendarLimitException e) {
+            failed(current, accountValid, ThingStatusDetail.COMMUNICATION_ERROR, e);
+        } catch (IllegalArgumentException e) {
+            failed(current, accountValid, ThingStatusDetail.CONFIGURATION_ERROR, e);
+        } catch (CalDavHttpException e) {
             synchronized (lifecycle) {
-                if (!valid(current, accountValid)) {
-                    return;
-                }
-                ThingStatusDetail detail = ThingStatusDetail.COMMUNICATION_ERROR;
-                if (e instanceof IllegalArgumentException && !(e instanceof CalendarLimitException)) {
-                    detail = ThingStatusDetail.CONFIGURATION_ERROR;
-                } else if (e instanceof CalDavHttpException http) {
-                    if (http.statusCode() == 401 || http.statusCode() == 403) {
-                        detail = ThingStatusDetail.CONFIGURATION_ERROR;
-                    }
-                    if (http.statusCode() == 404) {
-                        detail = synchronizedOnce ? ThingStatusDetail.GONE : ThingStatusDetail.CONFIGURATION_ERROR;
-                    }
-                }
-                set("sync#status", new StringType("ERROR"));
-                set("sync#error",
-                        new StringType("Calendar synchronization failed (" + e.getClass().getSimpleName() + ")"));
-                updateStatus(ThingStatus.OFFLINE, detail);
+                ThingStatusDetail detail = switch (e.statusCode()) {
+                    case 401, 403 -> ThingStatusDetail.CONFIGURATION_ERROR;
+                    case 404 -> synchronizedOnce ? ThingStatusDetail.GONE : ThingStatusDetail.CONFIGURATION_ERROR;
+                    default -> ThingStatusDetail.COMMUNICATION_ERROR;
+                };
+                failed(current, accountValid, detail, e);
             }
+        } catch (Exception e) {
+            failed(current, accountValid, ThingStatusDetail.COMMUNICATION_ERROR, e);
+        }
+    }
+
+    private void failed(long current, BooleanSupplier accountValid, ThingStatusDetail detail, Exception error) {
+        synchronized (lifecycle) {
+            if (!valid(current, accountValid)) {
+                return;
+            }
+            set("sync#status", new StringType("ERROR"));
+            set("sync#error",
+                    new StringType("Calendar synchronization failed (" + error.getClass().getSimpleName() + ")"));
+            updateStatus(ThingStatus.OFFLINE, detail);
         }
     }
 
@@ -267,8 +298,9 @@ public class CalendarHandler extends BaseThingHandler {
     }
 
     private void scheduleClock(long current) {
-        if (clockJob != null) {
-            clockJob.cancel(false);
+        ScheduledFuture<?> previous = clockJob;
+        if (previous != null) {
+            previous.cancel(false);
         }
         ZoneId zone = timeZoneProvider.getTimeZone();
         Instant now = Instant.now();
@@ -292,16 +324,68 @@ public class CalendarHandler extends BaseThingHandler {
 
     private void tick(long current) {
         synchronized (lifecycle) {
-            if (!active || generation != current || configuration == null || !loaded) {
+            CalendarConfiguration config = configuration;
+            if (!active || generation != current || config == null || !loaded) {
                 return;
             }
             ZoneId zone = timeZoneProvider.getTimeZone();
-            if (cachedZone != null && !cachedZone.equals(zone)) {
+            ZoneId previousZone = cachedZone;
+            CalendarWindow horizon = cachedHorizon;
+            ZonedDateTime now = ZonedDateTime.now(zone);
+            CalendarWindow window = CalendarWindow.from(config, zone, now);
+            if (previousZone != null && !previousZone.equals(zone)) {
+                clearEvents();
+                cacheIdentity = "";
                 set("sync#status", new StringType("ERROR"));
                 set("sync#error", new StringType("Time zone changed; waiting for synchronization"));
+                return;
             }
-            publish(Objects.requireNonNull(configuration), zone, ZonedDateTime.now(zone));
+            if (horizon != null && (window.start().isBefore(horizon.start()) || window.end().isAfter(horizon.end()))) {
+                set("sync#status", new StringType("ERROR"));
+                set("sync#error",
+                        new StringType("Requested range exceeds cached horizon; waiting for synchronization"));
+            }
+            publish(config, zone, now);
             scheduleClock(current);
+        }
+    }
+
+    private static String identity(AccountConfiguration account, URI uri, ZoneId zone) {
+        try {
+            String value = account.url + "\n" + account.username + "\n" + uri + "\n" + zone;
+            return HexFormat.of()
+                    .formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is unavailable", e);
+        }
+    }
+
+    private void restoreAtStartup(AccountConfiguration account, long current) {
+        CalendarConfiguration config;
+        synchronized (lifecycle) {
+            CalendarConfiguration configured = configuration;
+            if (!active || current != generation || configured == null || !configured.enabled || synchronizedOnce) {
+                return;
+            }
+            config = configured;
+        }
+        try {
+            CalDavConfiguration.validate(account);
+            ZoneId zone = timeZoneProvider.getTimeZone();
+            URI uri = CalDavConfiguration.validate(config, account);
+            CalendarWindow horizon = CalDavConfiguration.horizon(account, zone, ZonedDateTime.now(zone));
+            CalDavConfiguration.validate(CalendarWindow.from(config, zone, ZonedDateTime.now(zone)), horizon);
+            String identity = identity(account, uri, zone);
+            Restored restored = readCache(identity, horizon, zone, config);
+            synchronized (lifecycle) {
+                if (!active || current != generation || synchronizedOnce) {
+                    return;
+                }
+                cacheIdentity = identity;
+                applyCache(restored, zone, config);
+            }
+        } catch (IllegalArgumentException e) {
+            failed(current, () -> true, ThingStatusDetail.CONFIGURATION_ERROR, e);
         }
     }
 
@@ -331,33 +415,50 @@ public class CalendarHandler extends BaseThingHandler {
         storage.put(getThing().getUID().toString(), gson.toJson(new Persisted(cacheIdentity, snapshot, last)));
     }
 
-    private void restore(CalendarWindow horizon, ZoneId zone, CalendarConfiguration config) {
-        String raw = storage.get(getThing().getUID().toString());
-        if (raw == null || raw.length() > 16 * 1024 * 1024) {
-            return;
-        }
+    private record Restored(List<CalendarEvent> events, CalendarWindow horizon, State lastSync) {
+    }
+
+    private @Nullable Restored readCache(String identity, CalendarWindow horizon, ZoneId zone,
+            CalendarConfiguration config) {
         try {
+            String raw = storage.get(getThing().getUID().toString());
+            if (raw == null || raw.length() > 16 * 1024 * 1024) {
+                return null;
+            }
             Persisted persisted = Objects.requireNonNull(gson.fromJson(raw, Persisted.class));
-            if (!cacheIdentity.equals(persisted.identity())) {
-                return;
+            if (!identity.equals(persisted.identity())) {
+                return null;
             }
             var parsed = CalendarSynchronizer.expand(persisted.snapshot(), horizon, zone, config.includeCancelled);
-            events = parsed.events();
-            loaded = true;
-            cachedHorizon = horizon;
-            cachedZone = zone;
-            if (!"UNDEF".equals(persisted.lastSync()) && !"NULL".equals(persisted.lastSync())) {
-                set("sync#last", new DateTimeType(persisted.lastSync()));
-            }
-            publish(config, zone, ZonedDateTime.now(zone));
-            scheduleClock(generation);
+            String[] boundaries = persisted.snapshot().horizon().split("/", 3);
+            CalendarWindow storedHorizon = new CalendarWindow(Instant.parse(boundaries[0]).atZone(zone),
+                    Instant.parse(boundaries[1]).atZone(zone));
+            State lastSync = "UNDEF".equals(persisted.lastSync()) || "NULL".equals(persisted.lastSync())
+                    ? UnDefType.UNDEF
+                    : new DateTimeType(persisted.lastSync());
+            return new Restored(parsed.events(), storedHorizon, lastSync);
         } catch (RuntimeException e) {
-            storage.remove(getThing().getUID().toString());
+            // Persisted data is an optional recovery source; a server sync replaces an unusable cache.
+            return null;
         }
+    }
+
+    private void applyCache(@Nullable Restored restored, ZoneId zone, CalendarConfiguration config) {
+        if (restored == null) {
+            return;
+        }
+        events = restored.events();
+        loaded = true;
+        cachedHorizon = restored.horizon();
+        cachedZone = zone;
+        set("sync#last", restored.lastSync());
+        publish(config, zone, ZonedDateTime.now(zone));
+        scheduleClock(generation);
     }
 
     @Override
     public void handleRemoval() {
+        dispose();
         storage.remove(getThing().getUID().toString());
         super.handleRemoval();
     }
@@ -367,8 +468,9 @@ public class CalendarHandler extends BaseThingHandler {
         synchronized (lifecycle) {
             active = false;
             generation++;
-            if (clockJob != null) {
-                clockJob.cancel(true);
+            ScheduledFuture<?> previous = clockJob;
+            if (previous != null) {
+                previous.cancel(true);
                 clockJob = null;
             }
             synchronizer = null;

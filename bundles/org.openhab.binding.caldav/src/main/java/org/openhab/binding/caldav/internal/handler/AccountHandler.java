@@ -47,6 +47,7 @@ import org.slf4j.LoggerFactory;
 /**
  * Serial account worker; stale sessions cannot restart polling or publish connection state.
  * 
+ * @author Andreas Vilippus - Initial contribution
  * @author Andreas Vilippus - Coordinated lifecycle and recovery
  */
 @NonNullByDefault
@@ -67,6 +68,7 @@ public class AccountHandler extends BaseBridgeHandler {
         final CalDavClient client;
         volatile boolean valid = true;
         boolean running;
+        boolean stopping;
         boolean requested;
         int failures;
 
@@ -84,6 +86,7 @@ public class AccountHandler extends BaseBridgeHandler {
 
     @Override
     public void initialize() {
+        dispose();
         AccountConfiguration configuration = getConfigAs(AccountConfiguration.class);
         try {
             CalDavConfiguration.validate(configuration);
@@ -127,8 +130,9 @@ public class AccountHandler extends BaseBridgeHandler {
                 current.requested = true;
                 return;
             }
-            if (job != null) {
-                job.cancel(false);
+            ScheduledFuture<?> previous = job;
+            if (previous != null) {
+                previous.cancel(false);
             }
             job = scheduler.schedule(() -> poll(current), 0, TimeUnit.SECONDS);
         }
@@ -146,7 +150,7 @@ public class AccountHandler extends BaseBridgeHandler {
 
     private void poll(Session current) {
         synchronized (lifecycle) {
-            if (session != current || !current.valid || current.running) {
+            if (!current.equals(session) || !current.valid || current.running) {
                 return;
             }
             current.running = true;
@@ -173,7 +177,7 @@ public class AccountHandler extends BaseBridgeHandler {
             }
             List<Consumer<List<CalendarCollection>>> callbacks;
             synchronized (lifecycle) {
-                if (session != current) {
+                if (!current.equals(session)) {
                     return;
                 }
                 updateStatus(ThingStatus.ONLINE);
@@ -181,7 +185,16 @@ public class AccountHandler extends BaseBridgeHandler {
                 callbacks = List.copyOf(discovery);
                 discovery.clear();
             }
-            callbacks.forEach(callback -> callback.accept(collections));
+            for (var callback : callbacks) {
+                if (!current.valid) {
+                    return;
+                }
+                try {
+                    callback.accept(collections);
+                } catch (RuntimeException e) {
+                    logger.debug("CalDAV discovery callback failed ({})", e.getClass().getSimpleName());
+                }
+            }
             for (var thing : getThing().getThings()) {
                 if (!current.valid || Thread.currentThread().isInterrupted()) {
                     return;
@@ -192,29 +205,17 @@ public class AccountHandler extends BaseBridgeHandler {
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+        } catch (IllegalArgumentException e) {
+            failed(current, ThingStatusDetail.CONFIGURATION_ERROR, e);
+        } catch (CalDavHttpException e) {
+            failed(current, e.statusCode() == 401 || e.statusCode() == 403 ? ThingStatusDetail.CONFIGURATION_ERROR
+                    : ThingStatusDetail.COMMUNICATION_ERROR, e);
         } catch (Exception e) {
-            ThingStatusDetail detail = e instanceof IllegalArgumentException
-                    || e instanceof CalDavHttpException http && (http.statusCode() == 401 || http.statusCode() == 403)
-                            ? ThingStatusDetail.CONFIGURATION_ERROR
-                            : ThingStatusDetail.COMMUNICATION_ERROR;
-            synchronized (lifecycle) {
-                if (session != current || !current.valid) {
-                    return;
-                }
-                current.failures = Math.min(6, current.failures + 1);
-                updateStatus(ThingStatus.OFFLINE, detail, "CalDAV account connection failed");
-                discovery.clear();
-            }
-            for (var thing : getThing().getThings()) {
-                if (thing.getHandler() instanceof CalendarHandler calendar) {
-                    calendar.bridgeConnectionFailed();
-                }
-            }
-            logger.debug("CalDAV account synchronization failed ({})", e.getClass().getSimpleName());
+            failed(current, ThingStatusDetail.COMMUNICATION_ERROR, e);
         } finally {
             synchronized (lifecycle) {
                 current.running = false;
-                if (session == current && current.valid) {
+                if (current.equals(session) && current.valid) {
                     long delay = current.requested && current.failures == 0 ? 0
                             : Math.min(3600L, current.configuration.refreshInterval * (1L << current.failures));
                     current.requested = false;
@@ -222,29 +223,70 @@ public class AccountHandler extends BaseBridgeHandler {
                 }
             }
             if (!current.valid) {
-                stop(current.http);
+                close(current);
             }
         }
+    }
+
+    private void failed(Session current, ThingStatusDetail detail, Exception error) {
+        synchronized (lifecycle) {
+            if (!current.equals(session) || !current.valid) {
+                return;
+            }
+            current.failures = Math.min(6, current.failures + 1);
+            updateStatus(ThingStatus.OFFLINE, detail, "CalDAV account connection failed");
+            discovery.clear();
+        }
+        for (var thing : getThing().getThings()) {
+            if (!current.valid) {
+                return;
+            }
+            if (thing.getHandler() instanceof CalendarHandler calendar) {
+                calendar.bridgeConnectionFailed(() -> current.valid);
+            }
+        }
+        logger.debug("CalDAV account synchronization failed ({})", error.getClass().getSimpleName());
     }
 
     @Override
     public void dispose() {
         Session previous;
+        boolean stopIdle;
         synchronized (lifecycle) {
             previous = session;
+            stopIdle = previous != null && !previous.running;
             session = null;
             if (previous != null) {
                 previous.valid = false;
             }
-            if (job != null) {
-                job.cancel(true);
+            ScheduledFuture<?> previousJob = job;
+            if (previousJob != null) {
+                previousJob.cancel(true);
                 job = null;
             }
             discovery.clear();
         }
         if (previous != null) {
-            scheduler.execute(() -> stop(previous.http));
+            for (var thing : getThing().getThings()) {
+                if (thing.getHandler() instanceof CalendarHandler calendar) {
+                    calendar.bridgeConnectionFailed();
+                }
+            }
         }
+        if (previous != null && stopIdle) {
+            close(previous);
+        }
+    }
+
+    private void close(Session current) {
+        synchronized (lifecycle) {
+            if (current.stopping) {
+                return;
+            }
+            current.stopping = true;
+        }
+        // Disposal may interrupt the account worker; close Jetty on an un-interrupted scheduler task.
+        scheduler.execute(() -> stop(current.http));
     }
 
     private void stop(HttpClient http) {

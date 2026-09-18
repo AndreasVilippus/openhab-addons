@@ -19,6 +19,7 @@ import org.eclipse.jdt.annotation.NonNullByDefault;
 /**
  * HTTP failure without sensitive response bodies or URLs.
  * 
+ * @author Andreas Vilippus - Initial contribution
  * @author Andreas Vilippus - Structured synchronization failures
  */
 @NonNullByDefault
@@ -26,15 +27,21 @@ public class CalDavHttpException extends IOException {
     private static final long serialVersionUID = 1L;
     private final int statusCode;
     private final boolean invalidSyncToken;
+    private final boolean unsupportedReport;
 
     public CalDavHttpException(String operation, int statusCode) {
         this(operation, statusCode, false);
     }
 
     public CalDavHttpException(String operation, int statusCode, boolean invalidSyncToken) {
+        this(operation, statusCode, invalidSyncToken, false);
+    }
+
+    public CalDavHttpException(String operation, int statusCode, boolean invalidSyncToken, boolean unsupportedReport) {
         super("CalDAV " + operation + " failed with HTTP status " + statusCode);
         this.statusCode = statusCode;
         this.invalidSyncToken = invalidSyncToken;
+        this.unsupportedReport = unsupportedReport;
     }
 
     public int statusCode() {
@@ -43,5 +50,9 @@ public class CalDavHttpException extends IOException {
 
     public boolean invalidSyncToken() {
         return invalidSyncToken;
+    }
+
+    public boolean unsupportedReport() {
+        return unsupportedReport || statusCode == 405 || statusCode == 501;
     }
 }

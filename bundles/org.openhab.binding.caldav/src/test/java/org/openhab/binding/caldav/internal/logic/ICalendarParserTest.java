@@ -14,6 +14,7 @@ package org.openhab.binding.caldav.internal.logic;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.ZoneId;
@@ -30,7 +31,7 @@ class ICalendarParserTest {
     void parsesDailyRecurrenceAndExdate() {
         String calendar = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:daily\nDTSTART:20260916T080000Z\n"
                 + "DTEND:20260916T090000Z\nSUMMARY:Daily\nRRULE:FREQ=DAILY;COUNT=3\n"
-                + "EXDATE:20260917T080000\nEND:VEVENT\nEND:VCALENDAR\n";
+                + "EXDATE:20260917T080000Z\nEND:VEVENT\nEND:VCALENDAR\n";
 
         var events = ICalendarParser.parse(calendar);
 
@@ -39,6 +40,12 @@ class ICalendarParserTest {
         assertNotNull(events.get(1).start());
         var recurrenceStart = Objects.requireNonNull(events.get(1).start());
         assertEquals("2026-09-18T08:00Z", recurrenceStart.toOffsetDateTime().toString());
+    }
+
+    @Test
+    void rejectsMissingUid() {
+        assertThrows(IllegalArgumentException.class, () -> ICalendarParser
+                .parse("BEGIN:VCALENDAR\nBEGIN:VEVENT\nDTSTART:20260916T080000Z\nEND:VEVENT\nEND:VCALENDAR"));
     }
 
     @Test
@@ -73,10 +80,9 @@ class ICalendarParserTest {
     }
 
     @Test
-    void expandsRdateAndSkipsEventsWithoutUid() {
-        String calendar = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nDTSTART:20260916T080000Z\n"
-                + "DTEND:20260916T090000Z\nSUMMARY:Ignored\nEND:VEVENT\nBEGIN:VEVENT\nUID:rdate\n"
-                + "DTSTART:20260916T080000Z\nDTEND:20260916T090000Z\nRDATE:20260917T080000\n"
+    void expandsRdateIncludingStart() {
+        String calendar = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:rdate\n"
+                + "DTSTART:20260916T080000Z\nDTEND:20260916T090000Z\nRDATE:20260917T080000Z\n"
                 + "END:VEVENT\nEND:VCALENDAR\n";
 
         var events = ICalendarParser.parse(calendar);

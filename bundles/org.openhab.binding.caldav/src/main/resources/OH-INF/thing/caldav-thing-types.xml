@@ -93,13 +93,15 @@
 					<option value="FULL">@text/config.account.syncMode.option.FULL</option>
 				</options>
 			</parameter>
-			<parameter name="maxPastDays" type="integer" min="0" required="true" groupName="synchronization">
+			<parameter name="maxPastDays" type="integer" min="0" max="36500" required="true"
+				groupName="synchronization">
 				<label>@text/config.account.maxPastDays.label</label>
 				<description>@text/config.account.maxPastDays.description</description>
 				<default>30</default>
 				<unitLabel>d</unitLabel>
 			</parameter>
-			<parameter name="maxFutureDays" type="integer" min="1" required="true" groupName="synchronization">
+			<parameter name="maxFutureDays" type="integer" min="1" max="36500" required="true"
+				groupName="synchronization">
 				<label>@text/config.account.maxFutureDays.label</label>
 				<description>@text/config.account.maxFutureDays.description</description>
 				<default>365</default>
@@ -178,7 +180,7 @@
 				<description>@text/config.calendar.rangeEndOffset.description</description>
 				<default>6</default>
 			</parameter>
-			<parameter name="maxEvents" type="integer" min="1" required="true" groupName="range">
+			<parameter name="maxEvents" type="integer" min="1" max="50000" required="true" groupName="range">
 				<label>@text/config.calendar.maxEvents.label</label>
 				<description>@text/config.calendar.maxEvents.description</description>
 				<default>500</default>

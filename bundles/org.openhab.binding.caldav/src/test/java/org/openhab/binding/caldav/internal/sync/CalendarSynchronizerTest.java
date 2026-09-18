@@ -128,4 +128,52 @@ class CalendarSynchronizerTest {
         server.replies.add(response("", member("b", "invalid")));
         assertEquals(1, sync.synchronize(WINDOW, ZoneOffset.UTC, "FULL", false).failedResources());
     }
+
+    @Test
+    void failedPropstatDoesNotDeletePreviouslyPublishedResource() throws Exception {
+        Server server = new Server();
+        server.replies.add(response("", member("a", ICS)));
+        var sync = new CalendarSynchronizer(server, URI_CALENDAR);
+        sync.synchronize(WINDOW, ZoneOffset.UTC, "FULL", false);
+        var before = sync.snapshot();
+        server.replies.add(response("", member("b", ICS).replace("200 OK", "500 Server Error")));
+        assertThrows(IOException.class, () -> sync.synchronize(WINDOW, ZoneOffset.UTC, "FULL", false));
+        assertSame(before, sync.snapshot());
+    }
+
+    @Test
+    void explicitUnsupportedReportPreconditionAllowsFallback() throws Exception {
+        Server server = new Server();
+        server.replies.add(new CalDavHttpException("REPORT", 403, false, true));
+        server.replies.add(response("", member("a", "")));
+        server.replies.add(ICS);
+        var sync = new CalendarSynchronizer(server, URI_CALENDAR);
+        assertEquals(1, sync.synchronize(WINDOW, ZoneOffset.UTC, "AUTO", false).events().size());
+        assertEquals(3, server.calls);
+    }
+
+    @Test
+    void changedHorizonRefetchesEtagResource() throws Exception {
+        Server server = new Server();
+        server.replies.add(response("", member("a", "")));
+        server.replies.add(ICS);
+        server.replies.add(response("", member("a", "")));
+        server.replies.add(ICS);
+        var sync = new CalendarSynchronizer(server, URI_CALENDAR);
+        sync.synchronize(WINDOW, ZoneOffset.UTC, "ETAG", false);
+        sync.synchronize(new CalendarWindow(WINDOW.start(), WINDOW.end().plusDays(1)), ZoneOffset.UTC, "ETAG", false);
+        assertEquals(4, server.calls);
+    }
+
+    @Test
+    void resourceDeletedDuringDownloadIsNotReportedAsMissingCollection() {
+        Server server = new Server();
+        server.replies.add(response("one", member("a", "")));
+        server.replies.add(new CalDavHttpException("GET", 404));
+        var sync = new CalendarSynchronizer(server, URI_CALENDAR);
+        IOException failure = assertThrows(IOException.class,
+                () -> sync.synchronize(WINDOW, ZoneOffset.UTC, "SYNC_TOKEN", false));
+        assertEquals(IOException.class, failure.getClass());
+        assertEquals("", sync.snapshot().token());
+    }
 }

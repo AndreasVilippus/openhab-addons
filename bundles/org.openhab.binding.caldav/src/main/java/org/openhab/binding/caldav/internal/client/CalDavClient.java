@@ -34,6 +34,7 @@ import org.openhab.binding.caldav.internal.config.AccountConfiguration;
 /**
  * Bounded HTTP transport with authentication isolated to one account.
  * 
+ * @author Andreas Vilippus - Initial contribution
  * @author Andreas Vilippus - Account transport and security limits
  */
 @NonNullByDefault
@@ -79,15 +80,20 @@ public final class CalDavClient implements DavTransport {
                 String content = java.util.Objects.requireNonNullElse(getContentAsString(StandardCharsets.UTF_8), "");
                 if (status < 200 || status >= 300) {
                     boolean invalidToken = false;
+                    boolean unsupportedReport = false;
                     if (status == 403) {
                         try {
-                            invalidToken = CalDavXml.parse(content).getElementsByTagNameNS("DAV:", "valid-sync-token")
-                                    .getLength() > 0;
+                            var error = CalDavXml.parse(content).getDocumentElement();
+                            if ("DAV:".equals(error.getNamespaceURI()) && "error".equals(error.getLocalName())) {
+                                invalidToken = !DavResponse.children(error, "DAV:", "valid-sync-token").isEmpty();
+                                unsupportedReport = !DavResponse.children(error, "DAV:", "supported-report").isEmpty();
+                            }
                         } catch (Exception ignored) {
                             // A non-XML HTTP error remains an HTTP error, never a token reset.
                         }
                     }
-                    result.completeExceptionally(new CalDavHttpException(method, status, invalidToken));
+                    result.completeExceptionally(
+                            new CalDavHttpException(method, status, invalidToken, unsupportedReport));
                 } else {
                     result.complete(content);
                 }

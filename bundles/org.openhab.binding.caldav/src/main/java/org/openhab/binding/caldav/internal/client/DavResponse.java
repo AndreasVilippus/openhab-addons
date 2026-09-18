@@ -80,7 +80,7 @@ public record DavResponse(List<Resource> resources, String token) {
         return new DavResponse(List.copyOf(resources), text(root, "DAV:", "sync-token"));
     }
 
-    private static int status(String value) throws IOException {
+    static int status(String value) throws IOException {
         if (value.isEmpty()) {
             return 0;
         }
@@ -95,12 +95,12 @@ public record DavResponse(List<Resource> resources, String token) {
         }
     }
 
-    private static String text(Element parent, String namespace, String name) {
+    static String text(Element parent, String namespace, String name) {
         List<Element> values = children(parent, namespace, name);
         return values.isEmpty() ? "" : values.getFirst().getTextContent().trim();
     }
 
-    private static List<Element> children(Element parent, String namespace, String name) {
+    static List<Element> children(Element parent, String namespace, String name) {
         List<Element> children = new ArrayList<>();
         for (Node node = parent.getFirstChild(); node != null; node = node.getNextSibling()) {
             if (node instanceof Element element && namespace.equals(element.getNamespaceURI())

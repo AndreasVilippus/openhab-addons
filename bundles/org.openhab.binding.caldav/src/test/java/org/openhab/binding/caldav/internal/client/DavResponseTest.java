@@ -15,23 +15,25 @@ package org.openhab.binding.caldav.internal.client;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.net.URI;
+
 import org.eclipse.jdt.annotation.NonNullByDefault;
 import org.junit.jupiter.api.Test;
 
 @NonNullByDefault
-class CalendarResponseParserTest {
+class DavResponseTest {
     @Test
     void extractsEventsFromNamespacedMultistatusResponse() throws Exception {
         String xml = "<?xml version=\"1.0\"?><d:multistatus xmlns:d=\"DAV:\" "
-                + "xmlns:c=\"urn:ietf:params:xml:ns:caldav\"><d:response><d:propstat><d:prop>"
+                + "xmlns:c=\"urn:ietf:params:xml:ns:caldav\"><d:response><d:href>/one.ics</d:href><d:propstat><d:prop>"
                 + "<c:calendar-data>BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:one\n"
                 + "DTSTART:20260916T080000Z\nDTEND:20260916T090000Z\nSUMMARY:One\n"
-                + "END:VEVENT\nEND:VCALENDAR</c:calendar-data></d:prop></d:propstat></d:response></d:multistatus>";
+                + "END:VEVENT\nEND:VCALENDAR</c:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>";
 
-        var events = CalendarResponseParser.parse(xml);
+        var events = DavResponse.parse(xml, URI.create("https://example.org/calendar/"));
 
-        assertEquals(1, events.size());
-        assertEquals("one", events.get(0).uid());
+        assertEquals(1, events.resources().size());
+        assertEquals("https://example.org/one.ics", events.resources().getFirst().href());
     }
 
     @Test
@@ -40,6 +42,6 @@ class CalendarResponseParserTest {
                 + "<d:multistatus xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">"
                 + "<d:response><c:calendar-data>&xxe;</c:calendar-data></d:response></d:multistatus>";
 
-        assertThrows(Exception.class, () -> CalendarResponseParser.parse(xml));
+        assertThrows(Exception.class, () -> DavResponse.parse(xml, URI.create("https://example.org/calendar/")));
     }
 }

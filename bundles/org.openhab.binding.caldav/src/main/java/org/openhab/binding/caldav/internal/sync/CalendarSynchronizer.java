@@ -14,6 +14,7 @@ package org.openhab.binding.caldav.internal.sync;
 
 import java.io.IOException;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -95,7 +96,7 @@ public final class CalendarSynchronizer {
     }
 
     private static boolean unsupported(CalDavHttpException e) {
-        return e.statusCode() == 405 || e.statusCode() == 501;
+        return e.unsupportedReport();
     }
 
     private Snapshot full(CalendarWindow horizon, String key) throws Exception {
@@ -121,8 +122,7 @@ public final class CalendarSynchronizer {
             requireSuccess(resource);
             CachedResource old = previous.get(resource.href());
             CachedResource value = old != null && !resource.etag().isEmpty() && resource.etag().equals(old.etag()) ? old
-                    : new CachedResource(resource.etag(),
-                            transport.request("GET", URI.create(resource.href()), "", "0"));
+                    : new CachedResource(resource.etag(), download(resource.href()));
             put(resources, resource.href(), value);
         }
         return new Snapshot(key, "", Map.copyOf(resources));
@@ -142,13 +142,25 @@ public final class CalendarSynchronizer {
                 continue;
             }
             requireSuccess(resource);
-            String data = transport.request("GET", URI.create(resource.href()), "", "0");
+            String data = download(resource.href());
             put(resources, resource.href(), new CachedResource(resource.etag(), data));
         }
         return new Snapshot(key, response.token(), Map.copyOf(resources));
     }
 
+    private String download(String href) throws IOException, InterruptedException {
+        try {
+            return transport.request("GET", URI.create(href), "", "0");
+        } catch (CalDavHttpException e) {
+            if (e.statusCode() == 404) {
+                throw new IOException("Calendar resource changed during synchronization", e);
+            }
+            throw e;
+        }
+    }
+
     public static Result expand(Snapshot snapshot, CalendarWindow horizon, ZoneId zone, boolean includeCancelled) {
+        validateCache(snapshot);
         List<CalendarEvent> events = new ArrayList<>();
         int failures = 0;
         for (CachedResource resource : snapshot.resources().values()) {
@@ -168,13 +180,27 @@ public final class CalendarSynchronizer {
 
     private static void put(Map<String, CachedResource> resources, String href, CachedResource resource)
             throws IOException {
-        if (resource.data().length() > ICalendarParser.MAX_RESOURCE_SIZE) {
+        if (resource.data().getBytes(StandardCharsets.UTF_8).length > ICalendarParser.MAX_RESOURCE_SIZE) {
             throw new IOException("Calendar resource exceeds limit");
         }
         resources.put(href, resource);
         long bytes = resources.values().stream().mapToLong(value -> value.data().length()).sum();
         if (resources.size() > DavResponse.MAX_RESOURCES || bytes > 8 * 1024 * 1024) {
             throw new IOException("Calendar cache exceeds limit");
+        }
+    }
+
+    private static void validateCache(Snapshot candidate) {
+        long bytes = 0;
+        if (candidate.resources().size() > DavResponse.MAX_RESOURCES) {
+            throw new CalendarLimitException("Too many calendar resources");
+        }
+        for (CachedResource resource : candidate.resources().values()) {
+            int size = resource.data().getBytes(StandardCharsets.UTF_8).length;
+            bytes += size;
+            if (size > ICalendarParser.MAX_RESOURCE_SIZE || bytes > 8 * 1024 * 1024) {
+                throw new CalendarLimitException("Calendar cache exceeds limit");
+            }
         }
     }
 

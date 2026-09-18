@@ -13,6 +13,7 @@
 package org.openhab.binding.caldav.internal.logic;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -22,6 +23,7 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -46,6 +48,7 @@ import biweekly.util.ICalDate;
 /**
  * Bounded RFC 5545 expansion. Legacy date types remain at the library boundary.
  * 
+ * @author Andreas Vilippus - Initial contribution
  * @author Andreas Vilippus - Recurrence, exceptions and time-zone processing
  */
 @NonNullByDefault
@@ -64,7 +67,7 @@ public final class ICalendarParser {
 
     public static List<CalendarEvent> parse(String content, CalendarWindow window, ZoneId zone,
             boolean includeCancelled) {
-        if (content.length() > MAX_RESOURCE_SIZE) {
+        if (content.getBytes(StandardCharsets.UTF_8).length > MAX_RESOURCE_SIZE) {
             throw new CalendarLimitException("Calendar resource exceeds limit");
         }
         List<CalendarEvent> result = new ArrayList<>();
@@ -73,6 +76,12 @@ public final class ICalendarParser {
             boolean found = false;
             while ((calendar = reader.readNext()) != null) {
                 found = true;
+                Set<String> critical = Set.of("DTSTART", "DTEND", "DURATION", "RRULE", "RDATE", "EXDATE",
+                        "RECURRENCE-ID");
+                if (reader.getWarnings().stream()
+                        .anyMatch(w -> critical.contains(Objects.toString(w.getPropertyName(), "")))) {
+                    throw new IllegalArgumentException("Invalid calendar date or recurrence property");
+                }
                 expand(calendar, window, zone, includeCancelled, result);
             }
             if (!found) {
@@ -137,7 +146,7 @@ public final class ICalendarParser {
                 if (replacement != null) {
                     continue;
                 }
-                ZonedDateTime end = allDay ? date.plusDays(days).atStartOfDay(zone) : start.plus(length);
+                ZonedDateTime end = allDay ? date.plusDays(days).atStartOfDay(zone) : end(event, start, tz);
                 boolean recurring = event.getRecurrenceRule() != null || !event.getRecurrenceDates().isEmpty();
                 CalendarEvent instance = instance(event, recurring ? recurrence : null, start, end, allDay);
                 add(result, emitted, instance, window, zone, includeCancelled);
@@ -149,6 +158,19 @@ public final class ICalendarParser {
             var startProperty = event.getDateStart();
             if (startProperty == null) {
                 if (event.getStatus() != null && event.getStatus().isCancelled()) {
+                    if (includeCancelled) {
+                        var id = Objects.requireNonNull(event.getRecurrenceId());
+                        ICalDate date = id.getValue();
+                        VEvent master = calendar.getEvents().stream()
+                                .filter(e -> e.getRecurrenceId() == null && uid(e).equals(uid(event))).findFirst()
+                                .orElse(null);
+                        boolean allDay = !date.hasTime();
+                        ZonedDateTime start = allDay ? localDate(date).atStartOfDay(zone)
+                                : zoned(date.toInstant(), timezone(info, id, zone));
+                        ZonedDateTime end = allDay ? start.plusDays(master == null ? 1 : allDayLength(master))
+                                : start.plus(master == null ? Duration.ZERO : length(master));
+                        add(result, emitted, instance(event, identity(date), start, end, allDay), window, zone, true);
+                    }
                     continue;
                 }
                 throw new IllegalArgumentException("Recurrence exception has no start date");
@@ -157,7 +179,8 @@ public final class ICalendarParser {
             boolean allDay = !date.hasTime();
             ZonedDateTime start = allDay ? localDate(date).atStartOfDay(zone)
                     : zoned(date.toInstant(), timezone(info, startProperty, zone));
-            ZonedDateTime end = allDay ? start.plusDays(allDayLength(event)) : start.plus(length(event));
+            ZonedDateTime end = allDay ? start.plusDays(allDayLength(event))
+                    : end(event, start, timezone(info, startProperty, zone));
             CalendarEvent instance = instance(event,
                     identity(Objects.requireNonNull(event.getRecurrenceId()).getValue()), start, end, allDay);
             add(result, emitted, instance, window, zone, includeCancelled);
@@ -165,7 +188,11 @@ public final class ICalendarParser {
     }
 
     private static void normalizeFloating(VEvent event, TimezoneInfo info, ZoneId zone) {
-        for (var property : event.getProperties()) {
+        for (var property : event.getProperties().values()) {
+            // biweekly removes resolved TZIDs; a remaining identifier has no usable definition.
+            if (property.getParameters().getTimezoneId() != null) {
+                throw new IllegalArgumentException("Unresolved calendar time zone");
+            }
             if (property instanceof DateOrDateTimeProperty date && info.isFloating(date) && date.getValue().hasTime()) {
                 normalize(date.getValue(), zone);
             } else if (property instanceof RecurrenceDates dates) {
@@ -243,6 +270,24 @@ public final class ICalendarParser {
         return length;
     }
 
+    private static ZonedDateTime end(VEvent event, ZonedDateTime start, TimeZone timezone) {
+        var duration = event.getDuration();
+        if (event.getDateEnd() != null || duration == null) {
+            return zoned(start.toInstant().plus(length(event)), timezone);
+        }
+        var value = duration.getValue();
+        long days = Math.addExact(Math.multiplyExact(Objects.requireNonNullElse(value.getWeeks(), 0).longValue(), 7),
+                Objects.requireNonNullElse(value.getDays(), 0));
+        // RFC 5545 distinguishes nominal days/weeks from exact hours across DST transitions.
+        Calendar calendar = Calendar.getInstance(timezone, java.util.Locale.ROOT);
+        calendar.setTimeInMillis(start.toInstant().toEpochMilli());
+        calendar.add(Calendar.DAY_OF_MONTH, Math.toIntExact(days));
+        long seconds = Objects.requireNonNullElse(value.getHours(), 0).longValue() * 3600
+                + Objects.requireNonNullElse(value.getMinutes(), 0).longValue() * 60
+                + Objects.requireNonNullElse(value.getSeconds(), 0);
+        return zoned(calendar.toInstant().plusSeconds(seconds), timezone);
+    }
+
     private static long allDayLength(VEvent event) {
         var end = event.getDateEnd();
         var start = Objects.requireNonNull(event.getDateStart());
@@ -258,10 +303,11 @@ public final class ICalendarParser {
             ZonedDateTime start, ZonedDateTime end, boolean allDay) {
         List<String> categories = event.getCategories().stream().flatMap(value -> value.getValues().stream()).toList();
         return new CalendarEvent(uid(event), recurrence,
-                event.getSummary() == null ? "" : event.getSummary().getValue(),
-                event.getDescription() == null ? "" : event.getDescription().getValue(),
-                event.getLocation() == null ? "" : event.getLocation().getValue(), allDay ? null : start,
-                allDay ? null : end, allDay ? start.toLocalDate() : null, allDay ? end.toLocalDate() : null, allDay,
+                event.getSummary() == null ? "" : event.getSummary().getValue().replace("\r\n", "\n"),
+                event.getDescription() == null ? "" : event.getDescription().getValue().replace("\r\n", "\n"),
+                event.getLocation() == null ? "" : event.getLocation().getValue().replace("\r\n", "\n"),
+                allDay ? null : start, allDay ? null : end, allDay ? start.toLocalDate() : null,
+                allDay ? end.toLocalDate() : null, allDay,
                 event.getStatus() == null ? "CONFIRMED" : event.getStatus().getValue(), categories,
                 event.getOrganizer() == null ? "" : Objects.requireNonNullElse(event.getOrganizer().getEmail(), ""));
     }

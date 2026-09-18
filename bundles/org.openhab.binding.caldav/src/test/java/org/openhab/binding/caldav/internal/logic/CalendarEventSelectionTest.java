@@ -53,4 +53,16 @@ class CalendarEventSelectionTest {
         return new CalendarEvent(uid, recurrenceId, uid, "", "", start, start.plusHours(1), null, null, false,
                 "CONFIRMED", List.of(), "");
     }
+
+    @Test
+    void currentIncludesStartExcludesEndAndNextSkipsPastAndRunning() {
+        var past = timed("past", 7, null);
+        var running = timed("running", 8, null);
+        var future = timed("future", 9, null);
+        var now = ZonedDateTime.of(2026, 9, 17, 8, 0, 0, 0, ZoneOffset.UTC).toInstant();
+        var sorted = CalendarEventSelection.sort(List.of(future, running, past), ZoneOffset.UTC);
+        assertEquals(running, CalendarEventSelection.current(sorted, now, ZoneOffset.UTC));
+        assertEquals(future, CalendarEventSelection.next(sorted, now, ZoneOffset.UTC));
+        assertEquals(future, CalendarEventSelection.current(sorted, now.plusSeconds(3600), ZoneOffset.UTC));
+    }
 }

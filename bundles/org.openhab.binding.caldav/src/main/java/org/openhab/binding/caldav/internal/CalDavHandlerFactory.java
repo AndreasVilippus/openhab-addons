@@ -35,6 +35,7 @@ import org.osgi.service.component.annotations.Reference;
 /**
  * Creates handlers with core-managed networking, time-zone and persistence services.
  * 
+ * @author Andreas Vilippus - Initial contribution
  * @author Andreas Vilippus - Lifecycle-managed service dependencies
  */
 @NonNullByDefault

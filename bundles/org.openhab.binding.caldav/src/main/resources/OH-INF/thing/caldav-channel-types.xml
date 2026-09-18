@@ -218,11 +218,9 @@
 		<description>@text/channel.sync-status.description</description>
 		<state readOnly="true">
 			<options>
-				<option value="IDLE">@text/sync.status.IDLE</option>
 				<option value="SYNCING">@text/sync.status.SYNCING</option>
 				<option value="OK">@text/sync.status.OK</option>
 				<option value="PARTIAL">@text/sync.status.PARTIAL</option>
-				<option value="CONFLICT">@text/sync.status.CONFLICT</option>
 				<option value="ERROR">@text/sync.status.ERROR</option>
 			</options>
 		</state>

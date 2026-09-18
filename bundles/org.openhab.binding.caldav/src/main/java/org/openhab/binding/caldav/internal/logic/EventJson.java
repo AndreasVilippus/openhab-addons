@@ -26,6 +26,7 @@ import com.google.gson.JsonObject;
 /**
  * Serializes the public event contract without exposing implementation fields.
  * 
+ * @author Andreas Vilippus - Initial contribution
  * @author Andreas Vilippus - Complete JSON escaping
  */
 @NonNullByDefault
@@ -45,9 +46,11 @@ public final class EventJson {
             item.addProperty("title", event.title());
             item.addProperty("description", event.description());
             item.addProperty("location", event.location());
+            var timedStart = event.start();
+            var timedEnd = event.end();
             var start = event.allDay() ? event.allDayStart()
-                    : event.start() == null ? null : event.start().toOffsetDateTime();
-            var end = event.allDay() ? event.allDayEnd() : event.end() == null ? null : event.end().toOffsetDateTime();
+                    : timedStart == null ? null : timedStart.toOffsetDateTime();
+            var end = event.allDay() ? event.allDayEnd() : timedEnd == null ? null : timedEnd.toOffsetDateTime();
             if (start == null) {
                 item.add("start", JsonNull.INSTANCE);
             } else {

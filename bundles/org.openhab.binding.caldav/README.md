@@ -4,7 +4,7 @@ The CalDAV binding connects openHAB directly to CalDAV servers. An account is re
 
 The binding works independently and does not require another calendar binding.
 
-This binding is under development. The limitations below describe the current implementation; configuration options exposed in the UI do not yet all affect runtime behavior.
+The binding reads calendars; calendar creation and modification are not supported.
 
 ## Supported Things
 
@@ -18,11 +18,11 @@ The `calendar` thing represents one CalDAV Calendar Collection below an `account
 
 ## Discovery
 
-After configuring the account bridge, start a CalDAV scan from the Inbox to discover Calendar Collections. Background discovery is disabled. Things can also be configured manually.
+After configuring the account bridge, Calendar Collections are discovered in the background every ten minutes. A CalDAV scan can also be started from the Inbox. Things can be configured manually.
 
 With `discoveryMode=AUTO`, the scan resolves the current user principal and Calendar Home before listing collections. With `DIRECT`, it lists collections at `calendarHome`, or at `url` if `calendarHome` is empty. The discovered collection URI is stored as `calendarUid` and used to derive the Thing ID; the display name is not used as the identity.
 
-The account's periodic connection check always resolves the principal and Calendar Home, even in `DIRECT` mode. Manually configured calendars therefore still require an account endpoint that supports this discovery sequence.
+Periodic account checks use the same discovery mode. `DIRECT` can therefore be used with a Calendar Home that does not provide principal discovery. All discovered URLs must have the same scheme, host and effective port as the account URL.
 
 ## Time Range
 
@@ -58,23 +58,24 @@ event.end > range.start
 
 ## Synchronization
 
-The account bridge polls at `refreshInterval` (default 300 seconds, minimum 30 seconds) and coordinates updates for its Calendar Things. Each update performs a full `calendar-query` REPORT for the configured time range. Sync-token and ETag-based incremental synchronization are not implemented; changing `syncMode` has no effect.
+The account bridge polls at `refreshInterval` (default 300 seconds, minimum 30 seconds) and serializes requests for its Calendar Things. The synchronization horizon covers `maxPastDays` before today through `maxFutureDays` after today, inclusive. A Calendar Thing's output range must fit completely within that horizon.
 
-A successful calendar update publishes `sync#status=OK` and updates `sync#last`. A failed calendar update publishes `ERROR` and an error description, while leaving previously published event states unchanged. If the account connection check fails, the calendars are marked `BRIDGE_OFFLINE`, but their sync channels are not updated. Consequently, `sync#status=OK` alone does not prove that cached event data is still current. There is no persistent event cache or `PARTIAL` status handling.
+- `SYNC_TOKEN` uses WebDAV `sync-collection`, downloads changed resources and processes explicit deletions. An invalid sync token causes a new initial synchronization.
+- `ETAG` queries resource ETags and downloads only new or changed resources. Resources are removed only after a complete successful listing.
+- `FULL` requests all calendar data overlapping the horizon on every poll.
+- `AUTO` tries sync-token synchronization, then ETags, then full queries when the server explicitly rejects a report as unsupported (HTTP 405/501 or the DAV `supported-report` precondition). Authentication and temporary server errors do not trigger this fallback.
 
-Channel commands, including `REFRESH`, are currently ignored.
+A complete update publishes `sync#status=OK` and updates `sync#last`. Individual malformed or unsupported resources produce `PARTIAL`; other resources remain available and `sync#last` retains the last complete success. A failed request or incomplete listing publishes `ERROR`, preserves the previous data and does not advance the sync token. Bridge connection failures also set Calendar Things to `BRIDGE_OFFLINE` and their sync state to `ERROR`.
+
+Bounded raw calendar data and the last complete success are persisted through openHAB Storage. Restored data remains marked `ERROR` and the Calendar Thing remains offline until a server synchronization succeeds. Removing the Thing removes its stored cache. Connection failures are retried with bounded backoff; an individual calendar failure does not take other calendars offline.
+
+`REFRESH` on calendar channels republishes local state without making a network request. Before any usable data is available, event values are `UNDEF` and `current#active` is `OFF`.
 
 ## Recurring Events
 
-Recurrence support is currently limited:
+The binding expands RRULE, RDATE and EXDATE within the synchronization horizon, including monthly/yearly rules, BYDAY and UNTIL. RECURRENCE-ID exceptions replace their original occurrences, including moved and cancelled instances. `includeCancelled=false` excludes cancelled instances. All-day recurrence, UTC, TZID/VTIMEZONE and floating times are supported.
 
-- Timed events support basic `DAILY` and `WEEKLY` rules with `INTERVAL` and `COUNT`, capped at 1000 generated occurrences per rule before range filtering.
-- `UNTIL`, `BYDAY`, other rule modifiers, and other frequencies are not implemented. Unsupported modifiers can produce incorrect occurrences.
-- `RDATE` is expanded only when there is no `RRULE`. Exclusion matching is limited and does not normalize all `EXDATE` representations.
-- All-day recurrence expansion and reconciliation of `RECURRENCE-ID` exceptions with their master event are not implemented.
-- Cancelled events are not filtered; `includeCancelled` currently has no effect.
-
-Do not rely on this implementation for complete recurring-calendar results.
+`RECURRENCE-ID;RANGE=THISANDFUTURE` and period-valued RDATE are currently unsupported. Resources containing those forms are reported as `PARTIAL` instead of publishing an incorrect recurrence set. Parser and resource limits cause an error rather than silent truncation.
 
 ## Channels
 
@@ -86,8 +87,8 @@ All Calendar Thing channels are organized in channel groups.
 |---|---|---|
 | `events#json` | String | Parsed event instances overlapping the range, sorted and limited by `maxEvents` |
 | `events#count` | Number | Number of instances actually published in `events#json` |
-| `events#range-start` | DateTime | Defined in metadata, but not currently updated |
-| `events#range-end` | DateTime | Defined in metadata, but not currently updated |
+| `events#range-start` | DateTime | Effective inclusive range start |
+| `events#range-end` | DateTime | Effective exclusive range end |
 | `events#truncated` | Switch | Indicates that additional event instances were omitted because `maxEvents` was reached |
 
 ### `current`
@@ -109,7 +110,9 @@ All Calendar Thing channels are organized in channel groups.
 
 The `next` group exposes the same event fields as `current`, except that it has no `active` channel.
 
-Currently, `current` selects the first running timed event from the published list. All-day events are not recognized as current. `next` selects the first event that is not current, which can be a past or all-day event rather than the next future event. Selection is recalculated on synchronization, not at event boundaries. Start/end channels are not cleared when no event is selected and are not populated for all-day events; they can therefore retain old values.
+`current` selects the first sorted instance satisfying `start <= now < end`, including all-day events in the openHAB time zone. `next` selects the first future instance; past and running instances are excluded. A zero-duration event at the current instant can be next but is never current. Both selections use the complete window before the JSON `maxEvents` limit.
+
+Selection is recalculated locally at event boundaries, midnight and at least every minute for moving `NOW` windows. No network request is needed for these transitions. Missing event fields become `UNDEF` and `current#active` becomes `OFF`.
 
 ### `sync`
 
@@ -144,7 +147,7 @@ Example:
 
 For all-day events, `start` and `end` use `YYYY-MM-DD`; the `end` date is exclusive. A successful update with no matching events publishes `[]`.
 
-Treat `instanceId` as an opaque identifier. `maxEvents` limits the published list after sorting; `events#truncated` indicates that additional parsed events were omitted. It does not detect missing instances caused by unsupported recurrence rules. The JSON serializer currently escapes quotes, backslashes and newlines, but not all control characters; unusual event text can produce invalid JSON.
+Treat `instanceId` as an opaque identifier. `maxEvents` limits the published list after sorting; `events#truncated` indicates that additional parsed events were omitted. It describes the output limit only; resource and parser failures are reported separately through the sync channels. Event text is escaped by a JSON serializer, including control characters. Timed values are ISO-8601 timestamps with an offset; seconds may be omitted when zero.
 
 ## Configuration
 
@@ -153,31 +156,31 @@ Treat `instanceId` as an opaque identifier. `maxEvents` limits the published lis
 | Parameter | Default | Current behavior |
 |---|---|---|
 | `url` | Required | Account endpoint used for principal and Calendar Home discovery |
-| `username` | Required | HTTP Basic username |
-| `password` | Required | HTTP Basic password |
-| `requestTimeout` | `30` | Request timeout in seconds; metadata range 1–300 |
+| `username` | Required | Authentication username |
+| `password` | Required | Password or application password |
+| `requestTimeout` | `30` | Request timeout in seconds, 1–300 |
 | `refreshInterval` | `300` | Polling delay in seconds; minimum 30 |
-| `discoveryMode` | `AUTO` | Inbox scan mode: `AUTO` or `DIRECT`; does not change periodic account checks |
-| `calendarHome` | Empty | Optional collection-listing URL for `DIRECT` scans |
-| `authType` | `AUTO` | Not evaluated; only Basic authentication is implemented, including when `DIGEST` is selected |
-| `verifyCertificate` | `true` | Not evaluated; certificate verification remains enabled |
-| `syncMode` | `AUTO` | Not evaluated; only full calendar queries are implemented |
-| `maxPastDays` | `30` | Not enforced |
-| `maxFutureDays` | `365` | Not enforced |
-| `readOnly` | `true` | Not evaluated; writes are not implemented |
+| `discoveryMode` | `AUTO` | Discovery and account-check mode: `AUTO` or `DIRECT` |
+| `calendarHome` | Empty | Optional Calendar Home URL for `DIRECT` |
+| `authType` | `AUTO` | `BASIC`, `DIGEST`, or `AUTO` to accept either authentication challenge |
+| `verifyCertificate` | `true` | Validates TLS certificates; `false` disables verification for this account only |
+| `syncMode` | `AUTO` | `AUTO`, `SYNC_TOKEN`, `ETAG`, or `FULL` |
+| `maxPastDays` | `30` | Days before today in the sync horizon, 0–36500 |
+| `maxFutureDays` | `365` | Days after today in the sync horizon, 1–36500 |
+| `readOnly` | `true` | Must be `true`; `false` is rejected |
 
 ### Calendar Parameters
 
 | Parameter | Default | Current behavior |
 |---|---|---|
-| `path` | Required | Complete Calendar Collection URL |
+| `path` | Required | Calendar Collection URL or path relative to the account URL |
 | `calendarId` | Required | Collection identifier in metadata; not used to build requests |
 | `enabled` | `true` | Enables synchronization |
 | `rangeAnchor` | `TODAY` | `TODAY` (local midnight) or `NOW` |
 | `rangeStartOffset` | `0` | Inclusive start offset in days |
 | `rangeEndOffset` | `6` | Inclusive final-day offset; exclusive end adds one day |
-| `maxEvents` | `500` | Maximum number of published instances; minimum 1 |
-| `includeCancelled` | `false` | Not evaluated; cancelled instances can still be published |
+| `maxEvents` | `500` | Maximum published instances, 1–50000 |
+| `includeCancelled` | `false` | Includes cancelled instances when `true` |
 
 The following examples configure an account bridge and one calendar. Replace the
 server URL and credentials with values for the CalDAV service.
@@ -248,22 +251,25 @@ String   Family_Cal_SyncStatus  "Sync [%s]"             { channel="caldav:calend
 
 IONOS Mail Business provides the individual calendar URL in Webmail under the calendar's properties. Copy that complete URL into the Calendar Thing's `path`, and use your full email address as the username. See the [IONOS CalDAV instructions](https://www.ionos.com/help/email/managing-mail-business/syncing-mail-business-calendar-with-mac-os-x/).
 
-Configure the account `url` with an endpoint supporting principal and Calendar Home discovery, as described above. Do not construct a collection URL from its display name or `calendarId`. The `calendarId` parameter is required by the metadata but does not replace `path` in requests.
+Configure the account `url` with an endpoint supporting principal and Calendar Home discovery, or use `DIRECT` with the actual Calendar Home. Do not construct a collection URL from its display name or `calendarId`. The `calendarId` parameter is required by the metadata but does not replace `path` in requests.
 
 ## Security
 
-- Use HTTPS for account and calendar URLs. The client sends HTTP Basic credentials with each request; it does not enforce HTTPS itself.
-- TLS certificates are validated by the Java HTTP client. `verifyCertificate=false` currently has no effect.
-- HTTP redirects are not followed. Server-provided discovery URLs are resolved without a same-origin check, so use a trusted CalDAV server.
-- XML external entities, external DTDs and XInclude are disabled.
-- HTTP response sizes and discovered resource counts are not explicitly bounded. `maxEvents` limits published events, not downloaded data.
-- The binding performs no calendar writes, regardless of `readOnly`.
+- HTTPS is required, except for HTTP loopback addresses used by local servers. URLs with embedded credentials or fragments are rejected.
+- Basic and Digest authentication use an isolated account client. Credentials are not forwarded to foreign origins; redirects are not followed.
+- TLS certificate and hostname verification are enabled by default. Prefer installing a valid certificate chain over disabling verification.
+- XML external entities, DOCTYPE, external DTDs and XInclude are disabled. XML depth is limited to 64.
+- Limits are 8 MiB per HTTP/XML response and per resource cache, 1 MiB per calendar resource, 5000 resources and 50000 expanded instances per calendar/horizon. A limit failure retains the previous state.
+- Stored caches contain calendar data and sync tokens, but no passwords or authentication headers. Protect openHAB's storage like other personal calendar data.
+- The binding performs no calendar writes.
 
 ## Time Zones and All-Day Events
 
-The time range is calculated in the openHAB JVM's default time zone. `TODAY` uses local midnight, while `NOW` uses the current time. Both apply offsets in days, and the exclusive end is the anchor plus `rangeEndOffset + 1` days. Configure the end offset at least as large as the start offset.
+The time range and floating timestamps use the time zone configured in openHAB. `TODAY` uses local midnight; `NOW` uses the current time. Both apply offsets in calendar days, and the exclusive end is the anchor plus `rangeEndOffset + 1` days. The end offset must be at least the start offset.
 
-The parser handles UTC timestamps and numeric offsets, but does not interpret `TZID` or `VTIMEZONE`. Floating timestamps and local timestamps with `TZID` are currently treated as UTC, which can shift displayed times. All-day dates remain date-only values in `events#json`. Events without an explicit end are not assigned a default duration and are excluded by the range filter.
+Timed recurrences preserve local wall-clock time across daylight-saving changes. All-day dates remain date-only values in JSON, with exclusive end dates. Without DTEND or DURATION, an all-day event lasts one day and a timed event has duration zero. Zero-duration events belong to the output range when their start is within `[startInclusive, endExclusive)`.
+
+A time-zone change invalidates derived event data until synchronization recalculates it. Data extending beyond a cached horizon is marked stale while awaiting synchronization.
 
 ## Troubleshooting
 
