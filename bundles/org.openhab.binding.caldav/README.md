@@ -2,7 +2,7 @@
 
 The CalDAV binding connects openHAB directly to CalDAV servers. An account is represented by a bridge and each CalDAV Calendar Collection by a Calendar Thing.
 
-The binding works independently and does not require another calendar binding.
+The binding works independently and does not require another calendar binding. Its calendar parser dependencies, biweekly and vinnie, are embedded privately. Jackson is not required for the supported iCalendar text format; biweekly's optional jCal functionality is not used.
 
 The binding reads calendars; calendar creation and modification are not supported.
 
@@ -284,15 +284,6 @@ Verify the Calendar Collection path or run discovery again.
 ### TLS certificate error
 
 Fix the certificate trust chain rather than disabling certificate validation whenever possible.
-
-## Languages
-
-Initial UI languages:
-
-- English
-- German
-
-English is the source/default language. Technical IDs remain language-neutral.
 
 ## Development Notes
 
